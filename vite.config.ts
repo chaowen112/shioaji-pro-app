@@ -131,10 +131,11 @@ export default defineConfig(({ mode, command }) => {
             },
         },
         server: {
-            // honor a harness-assigned port (preview tooling sets PORT);
-            // default stays 5173 for tauri dev. Bind loopback only so Vite
-            // is never exposed to the LAN.
-            host: '127.0.0.1',
+            // honor a harness-assigned port (preview tooling sets PORT).
+            // This dev instance is reachable through the internal/VPN reverse
+            // proxy, so bind on all interfaces and allow only the exact host.
+            host: '0.0.0.0',
+            allowedHosts: ['shioaji.chaowen.tw'],
             port: Number(process.env.PORT) || 5173,
             fs: {
                 allow: [searchForWorkspaceRoot(process.cwd()), modulesAllowDir],
