@@ -33,6 +33,13 @@ import { pickOptionLeg } from '../lib/option-pick';
 import { fetchOptionRoots, fetchOptions, fetchSnapshots } from '../lib/shioaji';
 import type { Snapshot } from '../lib/types/market';
 import { fmtPrice, fmtSigned } from '../lib/utils/format';
+import {
+    fetchTaiwanOptionChain,
+    refreshTaiwanOptions,
+    fetchTaiwanVixHistory,
+    type TaiwanOptionAnalysis,
+    type TaiwanVixObservation,
+} from '../lib/taiwan-analysis';
 import * as dock from './bottom-dock.css';
 import * as styles from './option-chain.css';
 import { AsyncStatus } from './async-status';
@@ -257,8 +264,6 @@ export function chainStatusText(
     return parts.join('；');
 }
 
-const STRIKE_SPAN = 8; // strikes above/below ATM
-
 function isCall(c: OptContract): boolean {
     return c.option_right.toUpperCase().startsWith('C');
 }
@@ -311,7 +316,23 @@ export function OptionChain({
         readStored(LEGACY_MONTH_KEY),
     );
     const [loading, setLoading] = useState(true);
+    const [vix, setVix] = useState<TaiwanVixObservation | null>(null);
+    const [greeks, setGreeks] = useState<Map<string, TaiwanOptionAnalysis>>(new Map());
+    const [greeksLoading, setGreeksLoading] = useState(false);
+    const [greeksError, setGreeksError] = useState<string | null>(null);
+    // Taiwan analysis uses the same-origin dedicated Vite proxy prefix.
+    const analysisConfigured = true;
     const clock = useExpiryClock();
+
+    useEffect(() => {
+        let active = true;
+        void fetchTaiwanVixHistory()
+            .then((history) => {
+                if (active) setVix(history.observations[history.observations.length - 1] ?? null);
+            })
+            .catch(() => { if (active) setVix(null); });
+        return () => { active = false; };
+    }, []);
 
     // 台北日期改變（面板一直開著跨日）或手動重試時重新載入合約
     useEffect(() => {
@@ -375,6 +396,26 @@ export function OptionChain({
         [contracts, expiry],
     );
 
+    useEffect(() => {
+        if (!analysisConfigured || !expiry) {
+            setGreeks(new Map());
+            setGreeksError(null);
+            setGreeksLoading(false);
+            return;
+        }
+        let active = true;
+        setGreeksLoading(true);
+        setGreeksError(null);
+        const expiryDate = expiry.split(':').at(-1);
+        void fetchTaiwanOptionChain(expiryDate)
+            .then((response) => {
+                if (active) setGreeks(new Map(response.greeks.map((g) => [g.code, g])));
+            })
+            .catch(() => { if (active) setGreeksError('Greeks 暫不可用'); })
+            .finally(() => { if (active) setGreeksLoading(false); });
+        return () => { active = false; };
+    }, [analysisConfigured, expiry]);
+
     // 置中基準：合約標的指數（IX0001 加權）→ 台指期近月 → 履約價中位數
     const underlying =
         inExpiry.find((c) => c.underlying_code)?.underlying_code ??
@@ -422,19 +463,9 @@ export function OptionChain({
             ...new Set(inMonth.map((c) => c.strike_price)),
         ].sort((a, b) => a - b);
         if (strikes.length === 0) return [];
-        const center = atm ?? strikes[Math.floor(strikes.length / 2)]!;
-        let idx = 0;
-        let best = Infinity;
-        strikes.forEach((s, i) => {
-            const d = Math.abs(s - center);
-            if (d < best) {
-                best = d;
-                idx = i;
-            }
-        });
-        const lo = Math.max(0, idx - STRIKE_SPAN);
-        const sel = strikes.slice(lo, idx + STRIKE_SPAN + 1);
-        return sel.map((strike) => ({
+        // Render the complete dynamic chain. ATM is used only for highlighting,
+        // never to truncate the returned expiry surface.
+        return strikes.map((strike) => ({
             strike,
             call: inMonth.find(
                 (c) => c.strike_price === strike && isCall(c),
@@ -444,7 +475,7 @@ export function OptionChain({
             ),
         }));
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [inExpiry, atm === null ? 0 : Math.round(atm / 100)]);
+    }, [inExpiry]);
 
     const { snapshots: snaps, refresh: refreshQuotes, loading: quotesLoading, error: quotesError } = useLiveSnapshots(rows.flatMap(r => [r.call, r.put]).filter((c): c is OptContract => !!c));
 
@@ -497,12 +528,35 @@ export function OptionChain({
 
     const Cell = ({ code }: { code?: string }) => {
         const s = code ? snaps.get(code) : undefined;
+        const greek = code ? greeks.get(code) : undefined;
+        const fixed = (value: unknown, digits: number): string => {
+            const numeric = typeof value === 'number' ? value : Number(value);
+            return Number.isFinite(numeric) ? numeric.toFixed(digits) : '—';
+        };
+        const percent = (value: unknown, digits: number): string => {
+            const numeric = typeof value === 'number' ? value : Number(value);
+            return Number.isFinite(numeric) ? `${(numeric * 100).toFixed(digits)}%` : '—';
+        };
+        const loadingText = analysisConfigured && greeksLoading ? '…' : '—';
+        const greekCells = (
+            <>
+                <td className={styles.td} title={greek?.quality ?? greeksError ?? undefined}>
+                    {greek ? percent(greek.implied_volatility, 2) : loadingText}
+                </td>
+                <td className={styles.td}>{fixed(greek?.delta_per_index_point, 3)}</td>
+                <td className={styles.td}>{fixed(greek?.gamma_per_index_point_squared, 5)}</td>
+                <td className={styles.td}>{fixed(greek?.vega_per_1_vol_point, 2)}</td>
+                <td className={styles.td}>{fixed(greek?.theta_per_day, 2)}</td>
+                <td className={styles.td}>{fixed(greek?.rho_per_rate_decimal, 2)}</td>
+            </>
+        );
         if (!s) {
             return (
                 <>
                     <td className={styles.td}>—</td>
                     <td className={styles.td}>—</td>
                     <td className={styles.td}>—</td>
+                    {greekCells}
                 </>
             );
         }
@@ -519,6 +573,7 @@ export function OptionChain({
                 <td className={styles.td}>
                     {s.sell_price ? fmtPrice(s.sell_price, 0) : '—'}
                 </td>
+                {greekCells}
             </>
         );
     };
@@ -535,6 +590,9 @@ export function OptionChain({
                         saveExpiry(key);
                     }}
                 />
+                <span className={styles.status} title="Taiwan VIX（自算，非 TAIFEX 官方值）">
+                    Taiwan VIX（自算，非 TAIFEX 官方值）：{vix?.value == null ? '—' : vix.value.toFixed(2)} {vix?.status ?? 'INSUFFICIENT_DATA'}
+                </span>
                 <span
                     className={styles.atm}
                     title={
@@ -557,12 +615,23 @@ export function OptionChain({
                 </span>
                 <RefreshButton
                     label="更新報價"
-                    loading={quotesLoading}
+                    loading={quotesLoading || greeksLoading}
                     onClick={() => {
-                        void refreshQuotes();
-                        void refQuery.refresh();
-                        // 合約有讀取失敗時一併重試
-                        if (!complete) reloadContracts();
+                        const expiryDate = expiry?.split(':').at(-1);
+                        setGreeksLoading(true);
+                        setGreeksError(null);
+                        void refreshTaiwanOptions()
+                            .then(() => expiryDate ? fetchTaiwanOptionChain(expiryDate) : null)
+                            .then((response) => {
+                                if (response) setGreeks(new Map(response.greeks.map((g) => [g.code, g])));
+                            })
+                            .catch(() => setGreeksError('Greeks 更新失敗'))
+                            .finally(() => {
+                                setGreeksLoading(false);
+                                void refreshQuotes();
+                                void refQuery.refresh();
+                                if (!complete) reloadContracts();
+                            });
                     }}
                 />
             </div>
@@ -580,13 +649,13 @@ export function OptionChain({
                 <table className={styles.table}>
                     <thead>
                         <tr>
-                            <th className={styles.th} colSpan={3}>
+                            <th className={styles.th} colSpan={9}>
                                 CALL 買權
                             </th>
                             <th className={`${styles.th} ${styles.strikeTh}`}>
                                 履約價
                             </th>
-                            <th className={styles.th} colSpan={3}>
+                            <th className={styles.th} colSpan={9}>
                                 PUT 賣權
                             </th>
                         </tr>
@@ -594,10 +663,22 @@ export function OptionChain({
                             <th className={styles.th}>成交</th>
                             <th className={styles.th}>買</th>
                             <th className={styles.th}>賣</th>
-                            <th className={`${styles.th} ${styles.strikeTh}`} />
+                            <th className={styles.th} title="Implied volatility, annualized">IV</th>
+                            <th className={styles.th} title="Delta per index point">Δ</th>
+                            <th className={styles.th} title="Gamma per index point squared">Γ</th>
+                            <th className={styles.th} title="Vega per 1 volatility point">Vega</th>
+                            <th className={styles.th} title="Theta per day">Theta</th>
+                            <th className={styles.th} title="Rho per rate decimal">Rho</th>
+                            <th className={`${styles.th} ${styles.strikeTh}`}/>
                             <th className={styles.th}>成交</th>
                             <th className={styles.th}>買</th>
                             <th className={styles.th}>賣</th>
+                            <th className={styles.th} title="Implied volatility, annualized">IV</th>
+                            <th className={styles.th} title="Delta per index point">Δ</th>
+                            <th className={styles.th} title="Gamma per index point squared">Γ</th>
+                            <th className={styles.th} title="Vega per 1 volatility point">Vega</th>
+                            <th className={styles.th} title="Theta per day">Theta</th>
+                            <th className={styles.th} title="Rho per rate decimal">Rho</th>
                         </tr>
                     </thead>
                     <tbody>

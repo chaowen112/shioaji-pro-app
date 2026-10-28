@@ -1,0 +1,3 @@
+# Runtime dependencies for PostgreSQL persistence and optional Shioaji SDK adapter.
+psycopg[binary]>=3.2,<4
+shioaji>=1.7,<2

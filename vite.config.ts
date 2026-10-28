@@ -8,6 +8,7 @@ import { vanillaExtractPlugin } from '@vanilla-extract/vite-plugin';
 import react from '@vitejs/plugin-react';
 import { defineConfig, loadEnv, searchForWorkspaceRoot } from 'vite';
 import { configDefaults } from 'vitest/config';
+import { taiwanAnalysisApi } from './src/server/taiwan-analysis-api';
 
 // closed-source modules (AI Agent, future tiered features) live in the
 // private repo, checked out into ./modules on desktop builds; open-source
@@ -114,7 +115,7 @@ export default defineConfig(({ mode, command }) => {
                     .trim(),
             ),
         },
-        plugins: [vanillaExtractPlugin(), react()],
+        plugins: [taiwanAnalysisApi(), vanillaExtractPlugin(), react()],
         test: {
             // The desktop overlay is mirrored here for Tauri dev/CI, but its
             // Rust-adjacent Node tests use node:test rather than Vitest.
@@ -131,19 +132,36 @@ export default defineConfig(({ mode, command }) => {
             },
         },
         server: {
-            // honor a harness-assigned port (preview tooling sets PORT);
-            // default stays 5173 for tauri dev. Bind loopback only so Vite
-            // is never exposed to the LAN.
-            host: '127.0.0.1',
+            // This instance is behind the internal/VPN reverse proxy.
+            host: '0.0.0.0',
+            allowedHosts: ['shioaji.chaowen.tw'],
             port: Number(process.env.PORT) || 5173,
             fs: {
                 allow: [searchForWorkspaceRoot(process.cwd()), modulesAllowDir],
             },
             proxy: {
-                // dev 打自帶 sidecar（scripts/dev-api.sh，與 CI 打包同版
-                // binary、port 21322）— 確保 API/UI 版本相符，不依賴使用
-                // 者自裝在 8080 的 CLI。要打別台時用 VITE_API_TARGET 蓋掉
-                '/api': env.VITE_API_TARGET ?? isolatedApi ?? 'http://127.0.0.1:21322',
+                // NPM's Basic Auth is for the browser-facing host. Shioaji's
+                // --auth is a separate Bearer credential; inject it here so
+                // NPM's Authorization: Basic header never reaches Shioaji.
+                // All Taiwan analysis requests are handled by taiwanAnalysisApi()
+                // in this same Vite process; only the remaining /api goes to Shioaji.
+                '/api': {
+                    target: env.VITE_API_TARGET ?? isolatedApi ?? 'http://127.0.0.1:21323',
+                    changeOrigin: true,
+                    configure(proxy) {
+                        proxy.on('proxyReq', (proxyReq) => {
+                            // Shioaji's local-server guard rejects browser Origin/Referer
+                            // forwarded through this same-origin reverse proxy.
+                            proxyReq.removeHeader('origin');
+                            proxyReq.removeHeader('referer');
+                            const apiKey = process.env.SJ_API_KEY;
+                            const secretKey = process.env.SJ_SEC_KEY;
+                            if (apiKey && secretKey) {
+                                proxyReq.setHeader('Authorization', `Bearer ${apiKey}:${secretKey}`);
+                            }
+                        });
+                    },
+                },
             },
         },
     };
