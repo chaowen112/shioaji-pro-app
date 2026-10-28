@@ -95,6 +95,7 @@ import { notify } from './lib/trade';
 import { tradingActionObserved, useTradingState } from './lib/trading-state';
 import { ensureStream } from './lib/stream';
 import { ensureAccounts } from './lib/account-store';
+import { fetchWorkspace, putWorkspace, WorkspaceSyncError } from './lib/workspace-sync';
 import type { ContractInfo } from './lib/types/contract';
 import {
     BLOCK_META,
@@ -979,15 +980,76 @@ function MainApp() {
     const cachedSelected = useContract(selected?.code ?? null);
     const [workspace, setWorkspace] = useState<Workspace>(() => initializeIndicatorPanels(loadWorkspace()));
     const [profiles, setProfiles] = useState<Profile[]>(loadProfiles);
+    const syncRevisionRef = useRef<number | null>(null);
+    const syncHydratedRef = useRef(false);
+    const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const syncGenerationRef = useRef(0);
     const selectedRef = useRef(selected);
     selectedRef.current = selected;
     const workspaceRef = useRef(workspace);
     workspaceRef.current = workspace;
     const profilesRef = useRef(profiles);
     profilesRef.current = profiles;
+    const queueWorkspaceSync = useCallback(() => {
+        if (!syncHydratedRef.current || syncRevisionRef.current === null) return;
+        if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+        const generation = syncGenerationRef.current;
+        syncTimerRef.current = setTimeout(() => {
+            const expectedRevision = syncRevisionRef.current;
+            if (expectedRevision === null || generation !== syncGenerationRef.current) return;
+            void putWorkspace(workspaceRef.current, profilesRef.current, expectedRevision)
+                .then((saved) => {
+                    if (generation !== syncGenerationRef.current) return;
+                    syncRevisionRef.current = saved.revision;
+                })
+                .catch((error: unknown) => {
+                    if (!(error instanceof WorkspaceSyncError)) return;
+                    if (error.kind === 'conflict' && error.envelope) {
+                        syncGenerationRef.current += 1;
+                        syncRevisionRef.current = error.envelope.revision;
+                        workspaceRef.current = initializeIndicatorPanels(error.envelope.workspace);
+                        profilesRef.current = error.envelope.profiles;
+                        setWorkspace(workspaceRef.current);
+                        setProfiles(profilesRef.current);
+                        saveWorkspace(workspaceRef.current);
+                        saveProfiles(profilesRef.current);
+                        notify({ kind: 'err', title: '版面已更新', body: '其他視窗的版面較新，已載入伺服器版本' });
+                    }
+                });
+        }, 500);
+    }, []);
     const itemsRef = useRef(items);
     itemsRef.current = items;
     const { width, containerRef, mounted } = useContainerWidth();
+
+    useEffect(() => {
+        let cancelled = false;
+        void fetchWorkspace().then((remote) => {
+            if (cancelled) return;
+            const shouldMigrateLocal = remote === null;
+            if (remote) {
+                syncGenerationRef.current += 1;
+                syncRevisionRef.current = remote.revision;
+                const nextWorkspace = initializeIndicatorPanels(remote.workspace);
+                workspaceRef.current = nextWorkspace;
+                profilesRef.current = remote.profiles;
+                setWorkspace(nextWorkspace);
+                setProfiles(remote.profiles);
+                saveWorkspace(nextWorkspace);
+                saveProfiles(remote.profiles);
+            } else {
+                syncRevisionRef.current = 0;
+            }
+            syncHydratedRef.current = true;
+            if (shouldMigrateLocal) queueWorkspaceSync();
+        }).catch(() => {
+            // Keep localStorage as the offline source of truth until a later edit.
+        });
+        return () => {
+            cancelled = true;
+            if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+        };
+    }, [queueWorkspaceSync]);
 
     useEffect(() => {
         if (mounted) markWorkspaceVisible();
@@ -1160,7 +1222,8 @@ function MainApp() {
         workspaceRef.current = w;
         setWorkspace(w);
         saveWorkspace(w);
-    }, []);
+        queueWorkspaceSync();
+    }, [queueWorkspaceSync]);
     // Applying a whole workspace (saved layout, preset, reset, agent command)
     // rebuilds the flash panels even when block ids repeat, so their quantity
     // and click-to-trade state come from the applied layout, never the old one.
@@ -1561,8 +1624,10 @@ function MainApp() {
                     ...(icon ? { icon } : {}),
                 },
             ];
+            profilesRef.current = next;
             setProfiles(next);
             saveProfiles(next);
+            queueWorkspaceSync();
             trackActivity('存版面', name);
             notify({
                 kind: 'ok',
@@ -1570,7 +1635,7 @@ function MainApp() {
                 body: `「${name}」已加入版面列表`,
             });
         },
-        [profiles, workspace],
+        [profiles, workspace, queueWorkspaceSync],
     );
 
     const loadProfile = useCallback(
@@ -1644,10 +1709,12 @@ function MainApp() {
     const deleteProfile = useCallback(
         (name: string) => {
             const next = profiles.filter((p) => p.name !== name);
+            profilesRef.current = next;
             setProfiles(next);
             saveProfiles(next);
+            queueWorkspaceSync();
         },
-        [profiles],
+        [profiles, queueWorkspaceSync],
     );
 
     const renameProfile = useCallback(
@@ -1665,11 +1732,13 @@ function MainApp() {
             const next = profiles.map((p) =>
                 p.name === oldName ? { ...p, name: newName } : p,
             );
+            profilesRef.current = next;
             setProfiles(next);
             saveProfiles(next);
+            queueWorkspaceSync();
             trackActivity('版面改名', newName);
         },
-        [profiles],
+        [profiles, queueWorkspaceSync],
     );
 
     const [paletteOpen, setPaletteOpen] = useState(false);
