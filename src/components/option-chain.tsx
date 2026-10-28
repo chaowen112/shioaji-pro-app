@@ -667,7 +667,7 @@ export function OptionChain({
                             <th className={styles.th} title="Delta per index point">Δ</th>
                             <th className={styles.th} title="Gamma per index point squared">Γ</th>
                             <th className={styles.th} title="Vega per 1 volatility point">Vega</th>
-                            <th className={styles.th} title="Theta per day">Theta</th>
+                            <th className={styles.th} title="Theta per day">Theta/day</th>
                             <th className={styles.th} title="Rho per rate decimal">Rho</th>
                             <th className={`${styles.th} ${styles.strikeTh}`}/>
                             <th className={styles.th}>成交</th>
@@ -677,7 +677,7 @@ export function OptionChain({
                             <th className={styles.th} title="Delta per index point">Δ</th>
                             <th className={styles.th} title="Gamma per index point squared">Γ</th>
                             <th className={styles.th} title="Vega per 1 volatility point">Vega</th>
-                            <th className={styles.th} title="Theta per day">Theta</th>
+                            <th className={styles.th} title="Theta per day">Theta/day</th>
                             <th className={styles.th} title="Rho per rate decimal">Rho</th>
                         </tr>
                     </thead>
